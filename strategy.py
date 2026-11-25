@@ -65,7 +65,7 @@ def run_qm(df, p, htf_up=True, use_htf=False):
     start = max(60, 2 * L + 2)
     for i in range(start, n):
         a = atr14[i]
-        ev = dict(bos=False, tap=False, hit=0, fail=False, end=False, sig=None)
+        ev = dict(bos=False, tap=False, hit=0, fail=False, end=False, sig=None, block=None, score=None)
 
         # --- swings confirmados en esta vela
         pb = i - L
@@ -139,6 +139,16 @@ def run_qm(df, p, htf_up=True, use_htf=False):
             ok_vol = (not np.isnan(rvol)) and rvol >= p.vol_mult
             ok_htf = (not use_htf) or (htf_up if d == 1 else not htf_up)
             score = sum([ok_st, ok_rsi, div_ok, ok_cvd, ok_vol])
+            ev["score"] = int(score)
+            if hit_max < 1:
+                if not trigger:
+                    ev["block"] = "sin vela de confirmación" if in_win else "ventana de confirmación vencida"
+                elif not ok_htf:
+                    ev["block"] = "filtro HTF en contra"
+                elif not dir_ok:
+                    ev["block"] = "TP1 ya superado"
+                elif score < p.min_score:
+                    ev["block"] = f"confluencia {score}/{p.min_score}"
             if hit_max >= 1:
                 sig_done = True
             elif trigger and ok_htf and dir_ok and score >= p.min_score and abs(c[i] - slP) > 0:
@@ -173,5 +183,6 @@ def run_qm(df, p, htf_up=True, use_htf=False):
                 zFar = lsP - p.zone_atr * a if bear else lsP + p.zone_atr * a
 
         res = dict(ev=ev, stage=stage, dir=d, qml=lsP, head=hdP, bos=midP, zfar=zFar,
-                   atr=a, close=c[i], tp1=t1, tp2=t2, sl=slP, div_rsi=div_r, div_cvd=div_c)
+                   atr=a, close=c[i], tp1=t1, tp2=t2, sl=slP, div_rsi=div_r, div_cvd=div_c,
+                   sig_done=sig_done, hit_max=hit_max)
     return res

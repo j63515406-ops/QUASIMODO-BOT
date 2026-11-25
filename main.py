@@ -176,8 +176,46 @@ def scan_cycle():
         what = "QM formado (BOS)" if ev["bos"] else "QML tocado"
         tg.send(f"👀 <b>{r['symbol']}</b> {what} · {'▲ alcista' if r['dir'] == 1 else '▼ bajista'} · {config.TIMEFRAME}\n"
                 f"QML {_px(r['qml'])} · Cabeza {_px(r['head'])} · BOS {_px(r['bos'])}")
-    log.info("Ciclo listo en %.0fs · analizados %d · patrones activos %d · señales %d",
-             time.time() - t0, len(results), forming, len(sigs))
+    report_cycle(results, sigs, time.time() - t0)
+
+
+def report_cycle(results, sigs, secs):
+    from collections import Counter
+    waiting = []          # stage 3: QM formado esperando el QML
+    touched = Counter()   # stage 4: QML tocado, motivo por el que aún no hay señal
+    new_bos = new_tap = 0
+    for r in results:
+        ev = r["ev"]
+        new_bos += ev["bos"]
+        new_tap += ev["tap"]
+        if r["stage"] == 3 and r["atr"] > 0:
+            waiting.append((abs(r["close"] - r["zfar"]) / r["atr"], r["symbol"], r["dir"]))
+        elif r["stage"] == 4:
+            if r["sig_done"]:
+                touched["señal ya emitida / en curso"] += 1
+            else:
+                touched[ev["block"] or "evaluando"] += 1
+    waiting.sort()
+    n3 = len(waiting)
+    n4 = sum(touched.values())
+    log.info("Ciclo %.0fs · analizados %d · QM formados esperando QML: %d · QML tocados: %d · "
+             "nuevos BOS: %d · nuevos toques: %d · SEÑALES: %d",
+             secs, len(results), n3, n4, new_bos, new_tap, len(sigs))
+    if waiting:
+        log.info("  más cerca del QML: " + ", ".join(
+            f"{s} {'▲' if d == 1 else '▼'} {x:.1f}ATR" for x, s, d in waiting[:5]))
+    if touched:
+        log.info("  tocados sin señal: " + " · ".join(f"{k}: {v}" for k, v in touched.most_common()))
+    if config.NOTIFY_SUMMARY:
+        lines = [f"📡 <b>Resumen {config.TIMEFRAME}</b> · {len(results)} monedas · señales {len(sigs)}",
+                 f"🆕 BOS nuevos {new_bos} · toques nuevos {new_tap}",
+                 f"⏳ Esperando QML: {n3}"]
+        for x, s, d in waiting[:8]:
+            lines.append(f"  {'▲' if d == 1 else '▼'} {s} a {x:.1f} ATR del QML")
+        lines.append(f"🎯 QML tocado sin señal: {n4}")
+        for k, v in touched.most_common():
+            lines.append(f"  {v}× {k}")
+        tg.send("\n".join(lines))
 
 
 def monitor_loop():
