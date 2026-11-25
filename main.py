@@ -17,6 +17,14 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("main")
 
+
+def _i_raw(name):
+    import os
+    try:
+        return int(float(os.getenv(name, "0") or 0))
+    except ValueError:
+        return 0
+
 bx = BingX()
 trader = Trader(bx)
 params = Params(**config.STRATEGY)
@@ -228,6 +236,8 @@ def monitor_loop():
 
 
 def main():
+    if _i_raw("MIN_SCORE") > 5:
+        log.warning("MIN_SCORE=%s es imposible (máx. 5); se usa 5", _i_raw("MIN_SCORE"))
     mode = "📝 PAPEL (solo avisos)" if config.DRY_RUN else "⚡ REAL"
     if not config.DRY_RUN:
         if not (config.BINGX_API_KEY and config.BINGX_API_SECRET):

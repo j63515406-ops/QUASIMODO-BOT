@@ -68,7 +68,7 @@ STRATEGY = dict(
     sig_mode=_s("SIG_MODE", "confirm").lower(),   # confirm | touch
     conf_win=_i("CONF_WIN", 5),
     sl_buf=_f("SL_BUF", 0.1),
-    min_score=_i("MIN_SCORE", 3),
+    min_score=max(0, min(_i("MIN_SCORE", 3), 5)),  # máximo posible = 5
     st_len=_i("ST_LEN", 10),
     st_fac=_f("ST_FAC", 3.0),
     rsi_len=_i("RSI_LEN", 14),
