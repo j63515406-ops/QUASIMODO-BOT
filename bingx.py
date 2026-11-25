@@ -4,11 +4,23 @@ import logging
 import threading
 import time
 
+import pandas as pd
 import requests
 
 import config
 
 log = logging.getLogger("bingx")
+
+
+def to_df(kl, tf_ms):
+    """Velas de BingX -> DataFrame, SIN la vela en formacion."""
+    df = pd.DataFrame(kl)
+    for col in ("open", "high", "low", "close", "volume"):
+        df[col] = pd.to_numeric(df[col])
+    df["time"] = pd.to_numeric(df["time"])
+    df = df.drop_duplicates("time").sort_values("time").reset_index(drop=True)
+    now_ms = int(time.time() * 1000)
+    return df[df["time"] + tf_ms <= now_ms].reset_index(drop=True)
 
 
 class RateLimiter:
@@ -87,16 +99,40 @@ class BingX:
     def tickers(self):
         return self._req("GET", "/openApi/swap/v2/quote/ticker")
 
-    def klines(self, symbol, interval, limit, end_time=None):
-        prm = {"symbol": symbol, "interval": interval, "limit": limit}
-        if end_time:
-            prm["endTime"] = int(end_time)
+    def klines(self, symbol, interval, limit):
         try:
-            data = self._req("GET", "/openApi/swap/v3/quote/klines", prm)
+            data = self._req("GET", "/openApi/swap/v3/quote/klines",
+                             {"symbol": symbol, "interval": interval, "limit": limit})
         except BingXError:
-            data = self._req("GET", "/openApi/swap/v2/quote/klines", prm)
+            data = self._req("GET", "/openApi/swap/v2/quote/klines",
+                             {"symbol": symbol, "interval": interval, "limit": limit})
         data = sorted(data, key=lambda k: int(k["time"]))
         return data
+
+    def klines_hist(self, symbol, interval, total, step=1000):
+        """Historico paginado hacia atras con endTime (para backtest). Devuelve las ultimas `total` velas."""
+        rows, end = {}, None
+        while len(rows) < total:
+            params = {"symbol": symbol, "interval": interval, "limit": step}
+            if end is not None:
+                params["endTime"] = end
+            try:
+                data = self._req("GET", "/openApi/swap/v3/quote/klines", params)
+            except BingXError:
+                data = self._req("GET", "/openApi/swap/v2/quote/klines", params)
+            if not data:
+                break
+            new = 0
+            for k in data:
+                t = int(k["time"])
+                if t not in rows:
+                    rows[t] = k
+                    new += 1
+            if new == 0:
+                break
+            end = min(rows) - 1
+        out = [rows[t] for t in sorted(rows)]
+        return out[-total:]
 
     def price(self, symbol):
         d = self._req("GET", "/openApi/swap/v2/quote/price", {"symbol": symbol})

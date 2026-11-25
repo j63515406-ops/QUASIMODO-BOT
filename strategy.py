@@ -1,8 +1,18 @@
 """
-Port a Python del indicador Quasimodo (QML / BOS / barrida de liquidez).
-Se reproduce la maquina de estados sobre las ultimas N velas CERRADAS y se
-devuelven los eventos de la ultima vela. No repinta: solo velas cerradas.
-Sin OI/liquidaciones (datos exclusivos de AlertaChart Pro): maximo 5 puntos.
+Quasimodo (QML / BOS / barrida de liquidez).
+
+Parte 1 - patron: replica la maquina de estados del Pine
+"Quasimodo QM Pattern, QML, BOS & Liquidity Sweep [LunqFX]"
+  0 buscando  ->  3 QM formado (BOS), esperando el QML  ->  4 QML tocado, objetivos en juego
+Solo velas CERRADAS: no repinta.
+
+Parte 2 - entrada (propia del bot, el Pine no la tiene): vela de confirmacion en el QML +
+confluencias (Supertrend, giro RSI, divergencia, CVD estimado, volumen relativo) + filtros de R:R y coste.
+
+run_qm() recorre TODA la serie y devuelve:
+  - el estado de la ultima vela (para el escaner en vivo)
+  - patterns: todos los QM detectados con su desenlace (mismas estadisticas que el HUD del Pine)
+  - signals: todas las senales de entrada (el escaner usa las de las ultimas N velas; el backtest, todas)
 """
 from dataclasses import dataclass
 
@@ -14,16 +24,19 @@ import indicators as ind
 
 @dataclass
 class Params:
+    # --- patron (defaults = Pine LunqFX)
     piv_len: int = 5
-    min_sweep: float = 0.15
-    min_leg: float = 1.5
-    zone_atr: float = 0.35
-    max_wait: int = 80
-    max_run: int = 150
-    sig_mode: str = "confirm"
+    min_sweep: float = 0.10      # barrida minima de la cabeza (x ATR)
+    min_leg: float = 0.0         # pierna minima swing medio->cabeza (x ATR). 0 = como el Pine
+    zone_atr: float = 0.25       # profundidad de la zona QML (x ATR)
+    max_wait: int = 60           # velas esperando el QML tras el BOS
+    max_run: int = 120           # velas tras el toque antes de cerrar como expirado
+    # --- entrada
+    sig_mode: str = "confirm"    # confirm = vela de confirmacion | touch = al tocar
     conf_win: int = 5
-    sl_buf: float = 0.1
-    min_score: int = 3
+    sl_buf: float = 0.1          # buffer del SL tras la cabeza (x ATR)
+    min_score: int = 2           # confluencias minimas (de 5) para AVISAR
+    min_rr: float = 1.0          # R:R minimo hasta TP1
     st_len: int = 10
     st_fac: float = 3.0
     rsi_len: int = 14
@@ -33,7 +46,15 @@ class Params:
     vol_mult: float = 1.2
 
 
-def run_qm(df, p, htf_up=True, use_htf=False, collect=False):
+def cost_r(entry, sl, fee_pct, slip_pct):
+    """Coste ida y vuelta (comision + deslizamiento, ambos lados) expresado en R."""
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return float("inf")
+    return 2.0 * (fee_pct + slip_pct) / 100.0 * entry / risk
+
+
+def run_qm(df, p, htf_up=True, use_htf=False):
     o = df["open"].values
     h = df["high"].values
     l = df["low"].values
@@ -56,19 +77,20 @@ def run_qm(df, p, htf_up=True, use_htf=False, collect=False):
     stage = 0
     d = 0
     lsP = midP = hdP = ext = zFar = t1 = t2 = slP = np.nan
-    bosB = tapB = touchB = used_head = None
+    bosB = tapB = touchB = used_head = head_b = None
     hit_max = 0
     sig_done = True
     div_ok = div_r = div_c = False
+    cur = None                     # patron en curso
+    patterns, signals = [], []
     res = {}
-    all_sigs = []
 
     start = max(60, 2 * L + 2)
     for i in range(start, n):
         a = atr14[i]
-        ev = dict(bos=False, tap=False, hit=0, fail=False, end=False, sig=None, block=None, score=None)
+        ev = dict(bos=False, tap=False, hit=0, fail=False, end=False, pat=None)
 
-        # --- swings confirmados en esta vela
+        # --- swings confirmados en esta vela (pivote en i-L)
         pb = i - L
         hv, lv = ph[i], pl[i]
         new = None
@@ -92,22 +114,30 @@ def run_qm(df, p, htf_up=True, use_htf=False, collect=False):
         if np.isnan(a):
             continue
 
-        # --- 4 · QML tocado: objetivos o fallo
+        # --- 4 · QML tocado: objetivos o fallo (cierre mas alla de la cabeza)
         if stage == 4:
             fail_now = (c[i] > hdP) if d == -1 else (c[i] < hdP)
             if fail_now:
                 ev["fail"] = True
+                ev["pat"] = cur
             else:
                 for k in (1, 2):
                     tk = t1 if k == 1 else t2
                     if hit_max == k - 1 and ((l[i] <= tk) if d == -1 else (h[i] >= tk)):
                         hit_max = k
                         ev["hit"] = k
+                        ev["pat"] = cur
             if ev["fail"] or hit_max == 2 or (i - tapB > p.max_run):
                 ev["end"] = True
+                cur["hit"] = hit_max
+                cur["end"] = i
+                cur["result"] = "complete" if hit_max == 2 else ("head_broken" if ev["fail"] else "expired")
+                ev["pat"] = cur
                 stage, d = 0, 0
+            else:
+                cur["hit"] = hit_max
 
-        # --- 3 · QM formado: esperar toque
+        # --- 3 · QM formado: esperar el toque del QML
         if stage == 3:
             ext = min(ext, l[i]) if d == -1 else max(ext, h[i])
             head_broken = (c[i] > hdP) if d == -1 else (c[i] < hdP)
@@ -115,17 +145,23 @@ def run_qm(df, p, htf_up=True, use_htf=False, collect=False):
             if tapped and not head_broken:
                 stage = 4
                 ev["tap"] = True
+                ev["pat"] = cur
                 tapB = touchB = i
                 hit_max = 0
                 sig_done = False
                 t1 = ext
                 t2 = lsP - (hdP - ext)
                 slP = hdP + p.sl_buf * a if d == -1 else hdP - p.sl_buf * a
+                cur["tap"] = i
+                cur["wait"] = i - bosB
             elif head_broken or (i - bosB > p.max_wait):
                 ev["end"] = True
+                cur["end"] = i
+                cur["result"] = "head_broken_no_tap" if head_broken else "missed"
+                ev["pat"] = cur
                 stage, d = 0, 0
 
-        # --- señal
+        # --- senal de entrada
         if stage == 4 and ((l[i] <= zFar) if d == 1 else (h[i] >= zFar)):
             touchB = i
         if stage == 4 and not sig_done and not ev["end"]:
@@ -140,30 +176,21 @@ def run_qm(df, p, htf_up=True, use_htf=False, collect=False):
             ok_vol = (not np.isnan(rvol)) and rvol >= p.vol_mult
             ok_htf = (not use_htf) or (htf_up if d == 1 else not htf_up)
             score = sum([ok_st, ok_rsi, div_ok, ok_cvd, ok_vol])
-            ev["score"] = int(score)
-            if hit_max < 1:
-                if not trigger:
-                    ev["block"] = "sin vela de confirmación" if in_win else "ventana de confirmación vencida"
-                elif not ok_htf:
-                    ev["block"] = "filtro HTF en contra"
-                elif not dir_ok:
-                    ev["block"] = "TP1 ya superado"
-                elif score < p.min_score:
-                    ev["block"] = f"confluencia {score}/{p.min_score}"
+            risk = abs(c[i] - slP)
+            rr1 = abs(t1 - c[i]) / risk if risk > 0 else 0.0
             if hit_max >= 1:
                 sig_done = True
-            elif trigger and ok_htf and dir_ok and score >= p.min_score and abs(c[i] - slP) > 0:
+            elif trigger and ok_htf and dir_ok and score >= p.min_score and risk > 0 and rr1 >= p.min_rr:
                 sig_done = True
-                risk = abs(c[i] - slP)
-                ev["sig"] = dict(
+                sg = dict(
                     dir=d, entry=float(c[i]), sl=float(slP), tp1=float(t1), tp2=float(t2),
-                    rr1=abs(t1 - c[i]) / risk, rr2=abs(t2 - c[i]) / risk, score=int(score), max_score=5,
+                    rr1=rr1, rr2=abs(t2 - c[i]) / risk, score=int(score), max_score=5,
                     st=bool(ok_st), rsi_ok=bool(ok_rsi), div=bool(div_ok), div_rsi=bool(div_r), div_cvd=bool(div_c),
                     cvd=bool(ok_cvd), vol=bool(ok_vol), rvol=None if np.isnan(rvol) else float(rvol),
                     rsi=float(rsi[i]), qml=float(lsP), head=float(hdP), bos=float(midP), zfar=float(zFar),
-                    atr=float(a), bar=i, mode=p.sig_mode)
-                if collect:
-                    all_sigs.append(dict(ev["sig"]))
+                    atr=float(a), bar=i, head_idx=head_b, mode=p.sig_mode)
+                signals.append(sg)
+                cur["signal"] = sg
 
         # --- 0 · buscando hombro -> swing medio -> cabeza + BOS
         if stage == 0 and len(swings) >= 3:
@@ -177,6 +204,7 @@ def run_qm(df, p, htf_up=True, use_htf=False, collect=False):
                 d = -1 if bear else 1
                 ev["bos"] = True
                 used_head = H["b"]
+                head_b = H["b"]
                 div_r = bool(H["r"] < A["r"]) if bear else bool(H["r"] > A["r"])
                 div_c = bool(H["c"] < A["c"]) if bear else bool(H["c"] > A["c"])
                 div_ok = div_r or div_c
@@ -184,10 +212,15 @@ def run_qm(df, p, htf_up=True, use_htf=False, collect=False):
                 ext = l[i] if bear else h[i]
                 bosB = i
                 zFar = lsP - p.zone_atr * a if bear else lsP + p.zone_atr * a
+                cur = dict(dir=d, ls=A["b"], mid=M["b"], head=H["b"], bos=i, tap=None, wait=None, hit=0,
+                           end=None, result=None, signal=None, qml=float(lsP), hd=float(hdP))
+                patterns.append(cur)
+                ev["pat"] = cur
 
         res = dict(ev=ev, stage=stage, dir=d, qml=lsP, head=hdP, bos=midP, zfar=zFar,
                    atr=a, close=c[i], tp1=t1, tp2=t2, sl=slP, div_rsi=div_r, div_cvd=div_c,
-                   sig_done=sig_done, hit_max=hit_max)
+                   head_idx=head_b, bos_idx=bosB, tap_idx=tapB, n=n)
     if res:
-        res["all_sigs"] = all_sigs
+        res["patterns"] = patterns
+        res["signals"] = signals
     return res
