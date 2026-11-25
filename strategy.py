@@ -33,7 +33,7 @@ class Params:
     vol_mult: float = 1.2
 
 
-def run_qm(df, p, htf_up=True, use_htf=False):
+def run_qm(df, p, htf_up=True, use_htf=False, collect=False):
     o = df["open"].values
     h = df["high"].values
     l = df["low"].values
@@ -61,6 +61,7 @@ def run_qm(df, p, htf_up=True, use_htf=False):
     sig_done = True
     div_ok = div_r = div_c = False
     res = {}
+    all_sigs = []
 
     start = max(60, 2 * L + 2)
     for i in range(start, n):
@@ -161,6 +162,8 @@ def run_qm(df, p, htf_up=True, use_htf=False):
                     cvd=bool(ok_cvd), vol=bool(ok_vol), rvol=None if np.isnan(rvol) else float(rvol),
                     rsi=float(rsi[i]), qml=float(lsP), head=float(hdP), bos=float(midP), zfar=float(zFar),
                     atr=float(a), bar=i, mode=p.sig_mode)
+                if collect:
+                    all_sigs.append(dict(ev["sig"]))
 
         # --- 0 · buscando hombro -> swing medio -> cabeza + BOS
         if stage == 0 and len(swings) >= 3:
@@ -185,4 +188,6 @@ def run_qm(df, p, htf_up=True, use_htf=False):
         res = dict(ev=ev, stage=stage, dir=d, qml=lsP, head=hdP, bos=midP, zfar=zFar,
                    atr=a, close=c[i], tp1=t1, tp2=t2, sl=slP, div_rsi=div_r, div_cvd=div_c,
                    sig_done=sig_done, hit_max=hit_max)
+    if res:
+        res["all_sigs"] = all_sigs
     return res

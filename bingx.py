@@ -87,13 +87,14 @@ class BingX:
     def tickers(self):
         return self._req("GET", "/openApi/swap/v2/quote/ticker")
 
-    def klines(self, symbol, interval, limit):
+    def klines(self, symbol, interval, limit, end_time=None):
+        prm = {"symbol": symbol, "interval": interval, "limit": limit}
+        if end_time:
+            prm["endTime"] = int(end_time)
         try:
-            data = self._req("GET", "/openApi/swap/v3/quote/klines",
-                             {"symbol": symbol, "interval": interval, "limit": limit})
+            data = self._req("GET", "/openApi/swap/v3/quote/klines", prm)
         except BingXError:
-            data = self._req("GET", "/openApi/swap/v2/quote/klines",
-                             {"symbol": symbol, "interval": interval, "limit": limit})
+            data = self._req("GET", "/openApi/swap/v2/quote/klines", prm)
         data = sorted(data, key=lambda k: int(k["time"]))
         return data
 
